@@ -1,0 +1,191 @@
+import json
+import os
+import traceback
+import numpy as np
+import gradio as gr
+import spaces
+from pathlib import Path
+from PIL import Image, ImageDraw
+from ultralytics import YOLO
+
+FINAL_MODEL = Path("best.pt")
+ALPHABET_FILE = Path("Alphabet.json")
+
+def load_inference_model():
+    model_path = str(FINAL_MODEL)
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"لم يتم العثور على ملف النموذج في المسار: {model_path}")
+    return YOLO(model_path)
+
+ID_TO_CHAR = {}
+if ALPHABET_FILE.exists():
+    try:
+        with open(ALPHABET_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            char_to_id = data.get("char_to_id", {})
+            ID_TO_CHAR = {v: k for k, v in char_to_id.items()}
+        print(f"✅ تم تحميل وترتيب الحروف بنجاح من ملف alphabet.json! (عدد الحروف: {len(ID_TO_CHAR)})")
+    except Exception as e:
+        print(f"⚠️ حدث خطأ أثناء قراءة ملف alphabet.json: {e}")
+
+if not ID_TO_CHAR:
+    try:
+        temp_model = load_inference_model()
+        ID_TO_CHAR = temp_model.names
+        print("⚠️ تم الاعتماد على أسماء النموذج الداخلية.")
+    except Exception:
+        pass
+
+
+def group_boxes_into_text(boxes_xyxy, cls_ids, line_thresh_ratio=0.6, space_factor=0.5):
+    if len(boxes_xyxy) == 0:
+        return ""
+
+    heights = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]
+    median_h = np.median(heights) if len(heights) else 20
+    y_centers = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2
+    order = np.argsort(y_centers)
+
+    lines = []
+    current = [order[0]]
+    current_y = y_centers[order[0]]
+
+    for idx in order[1:]:
+        if abs(y_centers[idx] - current_y) <= median_h * line_thresh_ratio:
+            current.append(idx)
+        else:
+            lines.append(current)
+            current = [idx]
+            current_y = y_centers[idx]
+    lines.append(current)
+
+    output = []
+    for line in lines:
+        line = sorted(line, key=lambda i: boxes_xyxy[i][0])
+        line_chars = []
+        widths = [boxes_xyxy[i][2] - boxes_xyxy[i][0] for i in line]
+        avg_w = np.mean(widths) if widths else 15
+
+        for i, idx in enumerate(line):
+            if i > 0:
+                prev_x2 = boxes_xyxy[line[i-1]][2]
+                curr_x1 = boxes_xyxy[idx][0]
+                gap = curr_x1 - prev_x2
+                if gap > (avg_w * space_factor):
+                    line_chars.append(" ")
+
+            char = ID_TO_CHAR.get(int(cls_ids[idx]), f"?[{int(cls_ids[idx])}]")
+            line_chars.append(char)
+
+        output.append("".join(line_chars))
+
+    return "\n".join(output)
+
+
+def draw_bboxes(image, boxes_xyxy, cls_ids, confs):
+    image = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(image)
+    for box, cid, conf in zip(boxes_xyxy, cls_ids, confs):
+        x1, y1, x2, y2 = map(int, box)
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
+        char_name = ID_TO_CHAR.get(int(cid), f"?({cid})")
+        label = f"{char_name} ({conf:.2f})"
+        draw.text((x1, max(0, y1 - 15)), label, fill="blue")
+    return image
+
+
+_INFERENCE_MODEL = None
+
+@spaces.GPU
+def process_image(image_input, conf_thresh, line_ratio):
+    global _INFERENCE_MODEL
+    try:
+        if image_input is None:
+            return None, "الرجاء رفع صورة أو تشغيل الكاميرا أولاً."
+
+        if isinstance(image_input, str):
+            image = Image.open(image_input)
+        elif isinstance(image_input, np.ndarray):
+            image = Image.fromarray(image_input)
+        else:
+            image = image_input
+
+        if _INFERENCE_MODEL is None:
+            _INFERENCE_MODEL = load_inference_model()
+
+        results = _INFERENCE_MODEL.predict(source=image, conf=conf_thresh, imgsz=1056, verbose=False)
+
+        if len(results) == 0 or results[0].boxes is None or len(results[0].boxes) == 0:
+            return image, "لم يتم العثور على أي حروف مطابقة بالثقة المحددة."
+
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+        cls_ids = results[0].boxes.cls.cpu().numpy()
+        confs = results[0].boxes.conf.cpu().numpy()
+
+        annotated = draw_bboxes(image, boxes, cls_ids, confs)
+        text = group_boxes_into_text(boxes, cls_ids, line_thresh_ratio=line_ratio)
+
+        return annotated, text
+
+    except Exception:
+        err = traceback.format_exc()
+        print(err)
+        return None, err
+
+
+with gr.Blocks(title="OCR — المخطوطات الروسية القديمة") as demo:
+    gr.Markdown("# 📜 نظام التعرف البصري على الحروف (OCR) - المخطوطات الروسية القديمة")
+    gr.Markdown("اختر طريقة الإدخال المناسبة أدناه: إما **رفع ملف صورة** من جهازك، أو استخدام **الكاميرا المباشرة (لايف)**.")
+
+    with gr.Tabs():
+        # التبويب الأول: رفع الملفات والصور
+        with gr.TabItem("📁 رفع ملف / صورة"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    img_upload = gr.Image(
+                        type="filepath", 
+                        sources=["upload", "clipboard"], 
+                        label="اختر صورة من الجهاز"
+                    )
+                    with gr.Accordion("إعدادات متقدمة", open=False):
+                        conf_slider_1 = gr.Slider(minimum=0.05, maximum=0.9, value=0.15, step=0.05, label="عتبة الثقة (Confidence Threshold)")
+                        line_slider_1 = gr.Slider(minimum=0.2, maximum=1.5, value=0.6, step=0.1, label="حساسية تجميع الأسطر (Line Spacing Ratio)")
+                    btn_upload = gr.Button("🔍 استخراج النص وتحديد الحروف", variant="primary")
+
+                with gr.Column(scale=1):
+                    img_out_1 = gr.Image(label="الصورة مع مربعات التحديد")
+                    txt_out_1 = gr.Textbox(label="النص المستخرج", lines=10, max_lines=20)
+
+            btn_upload.click(
+                fn=process_image,
+                inputs=[img_upload, conf_slider_1, line_slider_1],
+                outputs=[img_out_1, txt_out_1]
+            )
+
+        # التبويب الثاني: الكاميرا المباشرة (لايف)
+        with gr.TabItem("📹 الكاميرا المباشرة (لايف)"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    img_live = gr.Image(
+                        type="filepath", 
+                        sources=["webcam"], 
+                        streaming=True, 
+                        label="البث المباشر للكاميرا"
+                    )
+                    with gr.Accordion("إعدادات متقدمة", open=False):
+                        conf_slider_2 = gr.Slider(minimum=0.05, maximum=0.9, value=0.15, step=0.05, label="عتبة الثقة (Confidence Threshold)")
+                        line_slider_2 = gr.Slider(minimum=0.2, maximum=1.5, value=0.6, step=0.1, label="حساسية تجميع الأسطر (Line Spacing Ratio)")
+
+                with gr.Column(scale=1):
+                    img_out_2 = gr.Image(label="معاينة التحليل المباشر")
+                    txt_out_2 = gr.Textbox(label="النص المستخرج لحظياً", lines=10, max_lines=20)
+
+            # معالجة البث المباشر بشكل لحظي باستخدام stream
+            img_live.stream(
+                fn=process_image,
+                inputs=[img_live, conf_slider_2, line_slider_2],
+                outputs=[img_out_2, txt_out_2]
+            )
+
+demo.queue()
+demo.launch()

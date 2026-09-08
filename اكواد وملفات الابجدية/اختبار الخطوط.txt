@@ -1,0 +1,93 @@
+import os
+import tkinter as tk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+# الحروف المطلوبة بالكامل
+alphabet_chars = [
+    "п", "к", "щ", "н", "м", "х", "е", "э", "б", "р", "ь", "и", "з", "г", 
+    "ш", "ц", "ч", "ѳ", "ѣ", "ѵ", "ю", "л", "в", "ф", "с", "т", "о", "ы", 
+    "а", "у", "й", "я", "д", "ж", "ъ"
+]
+
+# دالة لتقسيم الحروف إلى مجموعات (مثلاً كل 12 حرف في سطر) لضمان النزول لأسطر متتالية حتى النهاية
+def chunk_list(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+# تقسيم الحروف إلى أسطر (كل سطر يحوي 12 حرفاً، يمكنك تغيير الرقم لو أردتِ)
+lines_of_chars = ["   ".join(chunk) for chunk in chunk_list(alphabet_chars, 12)]
+
+# مسار مجلد الخطوط داخل المشروع
+fonts_path = os.path.join(os.path.dirname(__file__), "fonts")
+font_files = [f for f in os.listdir(fonts_path) if f.lower().endswith((".ttf", ".otf"))]
+
+class FontViewerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("مستعرض خطوط المخطوطات (أسطر متعددة)")
+        self.root.geometry("900x500")
+        
+        self.index = 0
+        
+        # معلومات الخط الحالي
+        self.label_info = tk.Label(root, text="", font=("Arial", 14, "bold"))
+        self.label_info.pack(pady=10)
+        
+        # مكان لعرض الصورة الناتجة بالخط الفعلي
+        self.image_label = tk.Label(root)
+        self.image_label.pack(pady=10)
+        
+        # زر الانتقال للخط التالي
+        self.btn_next = tk.Button(root, text="الخط التالي ⬅", command=self.show_next, font=("Arial", 12), bg="#4CAF50", fg="white", padx=15, pady=5)
+        self.btn_next.pack(pady=10)
+        
+        self.show_font()
+
+    def show_font(self):
+        if self.index >= len(font_files):
+            self.label_info.config(text="تم الانتهاء من فحص جميع خطوط المجلد!")
+            self.image_label.config(image="")
+            self.btn_next.config(state="disabled")
+            return
+            
+        font_file = font_files[self.index]
+        font_path = os.path.join(fonts_path, font_file)
+        font_name = os.path.splitext(font_file)[0]
+        
+        self.label_info.config(text=f"الخط ({self.index+1}/{len(font_files)}): {font_name}")
+        
+        try:
+            # تحميل ملف الخط مباشرة باستخدام Pillow
+            font = ImageFont.truetype(font_path, 24)
+            
+            # تكبير طول الصورة لتكفي كل الأسطر حتى نهاية الحروف
+            img_width, img_height = 850, 220
+            image = Image.new("RGB", (img_width, img_height), color=(255, 255, 255))
+            draw = ImageDraw.Draw(image)
+            
+            # طباعة كل سطر في إحداثي Y مختلف تلقائياً حتى تنتهي الحروف
+            y_offset = 20
+            for line_text in lines_of_chars:
+                draw.text((20, y_offset), line_text, font=font, fill=(0, 0, 0))
+                y_offset += 45  # المسافة بين السطر والآخر
+            
+            # تحويل الصورة لتتوافق مع واجهة Tkinter
+            self.tk_image = ImageTk.PhotoImage(image)
+            self.image_label.config(image=self.tk_image)
+            
+        except Exception as e:
+            error_img = Image.new("RGB", (850, 220), color=(255, 230, 230))
+            draw = ImageDraw.Draw(error_img)
+            default_font = ImageFont.load_default()
+            draw.text((20, 80), f"تعذر قراءة ملف الخط: {e}", font=default_font, fill=(255, 0, 0))
+            self.tk_image = ImageTk.PhotoImage(error_img)
+            self.image_label.config(image=self.tk_image)
+
+    def show_next(self):
+        self.index += 1
+        self.show_font()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FontViewerApp(root)
+    root.mainloop()
